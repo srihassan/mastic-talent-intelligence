@@ -1,8 +1,23 @@
 from pathlib import Path
+import zipfile
 
-TARGET = Path("Ask_MASTIC_V11_RENDER_SAFE/platform/index.html")
+PACKAGE = Path("Ask_MASTIC_V11_RENDER_SAFE.zip")
+ROOT = Path("Ask_MASTIC_V11_RENDER_SAFE")
+TARGET = ROOT / "platform" / "index.html"
 MARKER = "/* V11.1 restore analytics context bars */"
 
+# The latest presentation ZIP stores platform/backend/etc at ZIP root.
+# Render's existing build/start commands expect them inside Ask_MASTIC_V11_RENDER_SAFE/.
+# Bootstrap that expected folder before the build command continues.
+try:
+    if PACKAGE.exists() and not TARGET.exists():
+        ROOT.mkdir(exist_ok=True)
+        with zipfile.ZipFile(PACKAGE, "r") as zf:
+            zf.extractall(ROOT)
+except Exception:
+    pass
+
+# Preserve the i-360 / Kajian Impak analytical-context bars in one-page mode.
 if TARGET.exists():
     try:
         html = TARGET.read_text(encoding="utf-8", errors="ignore")

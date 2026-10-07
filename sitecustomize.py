@@ -84,7 +84,7 @@ if APP.exists():
             old_health = """@app.get('/api/health')
 def stable_health_proxy():
     try:
-        r=http_requests.get(STABLE_ASK_MASTIC+'/api/health',timeout=45)
+        r=http_requests.get(STABLE_ASK_MASTIC+'/api/health',timeout=20)
         return JSONResponse(r.json(),status_code=r.status_code)
     except Exception as exc:
         return JSONResponse({'ok':False,'service_up':True,'upstream':'waking','error':str(exc)},status_code=200)
@@ -182,7 +182,7 @@ def stable_ask_proxy(req:AskRequest):
                 parts.append('From a management perspective, an aggregate surplus should not be interpreted as the talent issue being resolved. Attention should remain on occupations with projected deficits, field-to-job alignment and industry-relevant skills.')
             return JSONResponse({
                 'answer':' '.join(parts),
-                'sources':list(dict.fromkeys((ee.get('sources') or [])+(mm.get('sources') or []))),
+                'sources':_merge_sources(ee.get('sources'),mm.get('sources')),
                 'route':'local:management-fallback',
                 'confidence':'high',
                 'llm_used':False

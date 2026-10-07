@@ -64,7 +64,11 @@ body.impact-onepage #impact > .bi-context .impact-signal{
 </style>
 """
             html = html.replace("</head>", css + "\n</head>", 1)
-            TARGET.write_text(html, encoding="utf-8")
+        html = html.replace(
+            "Jawapan tidak dapat dijana. Pastikan Ollama dan backend Ask MASTIC sedang berjalan.",
+            "Ask MASTIC tidak dapat menjana jawapan buat masa ini. Sila cuba semula sebentar lagi."
+        )
+        TARGET.write_text(html, encoding="utf-8")
     except Exception:
         pass
 
@@ -101,7 +105,7 @@ def stable_ask_proxy(req:AskRequest):
             new_health = """# V11.2 local structured Ask MASTIC resilience
 @app.get('/api/health')
 def stable_health_proxy():
-    return JSONResponse({'ok':True,'service_up':True,'mode':'local-structured-with-upstream-fallback'},status_code=200)
+    return JSONResponse({'ok':True,'service_up':True,'mode':'evidence-ai-synthesis-with-local-fallback'},status_code=200)
 
 
 @app.post('/api/ask')
@@ -112,37 +116,86 @@ def stable_ask_proxy(req:AskRequest):
 
     language=_resolve_language(q,req.language)
 
-    # 1) Core management-demo questions are answered locally from structured data.
+    # 1) Classify the question before deciding whether a factual answer is enough.
+    ql=q.lower()
+    analytical_terms=(
+        'insight','insights','kenapa','mengapa','implikasi','risiko','rumusan',
+        'apa maksud','apakah maksud','apa yang perlu','perlu diberi perhatian',
+        'banding','perbandingan','hubungan','kaitkan','gabungkan','strategik',
+        'management','pengurusan','trend','corak','apa yang boleh disimpulkan'
+    )
+    analytical=is_analytical(q) or any(term in ql for term in analytical_terms)
+
     structured=answer_structured(q,language,req.context)
-    if structured and structured.get('answer'):
+
+    # Straight factual questions remain fast and deterministic.
+    if structured and structured.get('answer') and not analytical:
         payload=dict(structured)
         payload.setdefault('confidence','high')
         payload['llm_used']=False
-        payload['route']='local:'+str(payload.get('route','structured'))
+        payload['route']='local:factual:'+str(payload.get('route','structured'))
         return JSONResponse(payload,status_code=200)
 
-    # 2) Try the original hosted Ask MASTIC service for synthesis.
+    # 2) Analytical questions should go through the richer synthesis layer first.
+    # The previous hosted service contains the LLM synthesis path; this call is bounded
+    # so a sleeping upstream cannot break the live demo.
     try:
-        r=http_requests.post(STABLE_ASK_MASTIC+'/api/ask',json=req.model_dump(),timeout=55)
+        upstream_payload=req.model_dump()
+        upstream_payload['question']=q
+        r=http_requests.post(STABLE_ASK_MASTIC+'/api/ask',json=upstream_payload,timeout=45)
         if r.ok:
             try:
-                return JSONResponse(r.json(),status_code=200)
+                payload=r.json()
+                ans=str(payload.get('answer') or '').strip()
+                if ans:
+                    payload['route']='synthesis:'+str(payload.get('route','upstream'))
+                    return JSONResponse(payload,status_code=200)
             except Exception:
                 pass
     except Exception:
         pass
 
-    # 3) If the upstream is sleeping/unavailable, return a deterministic evidence draft.
+    # 3) Local analytical fallback: still interpret the evidence instead of returning
+    # a single number. This keeps the chatbot useful even when the LLM service sleeps.
     try:
+        if analytical and ('e&e' in ql or 'elektrik' in ql or 'elektronik' in ql) and (
+            'mismatch' in ql or 'ketidaksepadanan' in ql or 'padanan' in ql
+        ):
+            ee=answer_structured('permintaan dan penawaran bakat E&E',language,req.context) or {}
+            mm=answer_structured('ketidaksepadanan graduan',language,req.context) or {}
+            ee_ans=str(ee.get('answer') or '').strip()
+            mm_ans=str(mm.get('answer') or '').strip()
+            parts=[]
+            if language=='ms':
+                parts.append('Isyarat utama ialah cabaran bakat E&E bukan semata-mata jumlah bekalan, tetapi sejauh mana bakat itu sepadan dengan pekerjaan dan keperluan industri.')
+                if ee_ans:
+                    parts.append(ee_ans)
+                if mm_ans:
+                    parts.append(mm_ans)
+                parts.append('Secara pengurusan, lebihan pada peringkat agregat tidak boleh terus ditafsirkan sebagai isu bakat telah selesai. Tumpuan perlu diberi kepada pekerjaan yang masih berisiko defisit, padanan bidang–pekerjaan dan kemahiran yang diperlukan industri.')
+            else:
+                parts.append('The main signal is that the E&E talent challenge is not only about total supply, but whether talent is aligned with occupations and industry needs.')
+                if ee_ans:
+                    parts.append(ee_ans)
+                if mm_ans:
+                    parts.append(mm_ans)
+                parts.append('From a management perspective, an aggregate surplus should not be interpreted as the talent issue being resolved. Attention should remain on occupations with projected deficits, field-to-job alignment and industry-relevant skills.')
+            return JSONResponse({
+                'answer':' '.join(parts),
+                'sources':list(dict.fromkeys((ee.get('sources') or [])+(mm.get('sources') or []))),
+                'route':'local:management-fallback',
+                'confidence':'high',
+                'llm_used':False
+            },status_code=200)
+
         pack=build_evidence_pack(q,req.context)
         evidence_text=pack.get('text') or ''
         if evidence_text:
-            analytical=is_analytical(q) or pack.get('mode_hint')=='analytical' or len(pack.get('topics',[]))>1
-            draft=_draft_for(q,pack,None,analytical,False,language)
+            draft=_draft_for(q,pack,None,True if analytical else False,False,language)
             return JSONResponse({
                 'answer':draft or evidence_text,
                 'sources':pack.get('sources') or [],
-                'route':'local:evidence-fallback',
+                'route':'local:analytical-fallback' if analytical else 'local:evidence-fallback',
                 'confidence':'medium',
                 'llm_used':False
             },status_code=200)

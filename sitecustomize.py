@@ -1,5 +1,6 @@
 from pathlib import Path
 import zipfile
+import re
 
 PACKAGE = Path("Ask_MASTIC_V11_RENDER_SAFE.zip")
 ROOT = Path("Ask_MASTIC_V11_RENDER_SAFE")
@@ -76,36 +77,15 @@ body.impact-onepage #impact > .bi-context .impact-signal{
 # Emergency resilience patch: answer structured questions locally so Ask MASTIC
 # does not depend on a second sleeping Render service during a live demo.
 APP = ROOT / "backend" / "app.py"
-ASK_MARKER = "# V11.2 local structured Ask MASTIC resilience"
+ASK_MARKER = "# V11.3 robust Ask MASTIC routing"
 if APP.exists():
     try:
         app_text = APP.read_text(encoding="utf-8", errors="ignore")
         if ASK_MARKER not in app_text:
-            old_health = """@app.get('/api/health')
-def stable_health_proxy():
-    try:
-        r=http_requests.get(STABLE_ASK_MASTIC+'/api/health',timeout=20)
-        return JSONResponse(r.json(),status_code=r.status_code)
-    except Exception as exc:
-        return JSONResponse({'ok':False,'service_up':True,'upstream':'waking','error':str(exc)},status_code=200)
-
-
-@app.post('/api/ask')
-def stable_ask_proxy(req:AskRequest):
-    try:
-        r=http_requests.post(STABLE_ASK_MASTIC+'/api/ask',json=req.model_dump(),timeout=110)
-        try:
-            payload=r.json()
-        except Exception:
-            payload={'detail':r.text[:1000]}
-        return JSONResponse(payload,status_code=r.status_code)
-    except Exception as exc:
-        raise HTTPException(503,f'Ask MASTIC stable backend belum memberi respons: {exc}')
-"""
-            new_health = """# V11.2 local structured Ask MASTIC resilience
+            new_health = """# V11.3 robust Ask MASTIC routing
 @app.get('/api/health')
 def stable_health_proxy():
-    return JSONResponse({'ok':True,'service_up':True,'mode':'evidence-ai-synthesis-with-local-fallback'},status_code=200)
+    return JSONResponse({'ok':True,'service_up':True,'mode':'local-management-first-with-synthesis-fallback'},status_code=200)
 
 
 @app.post('/api/ask')
@@ -115,8 +95,6 @@ def stable_ask_proxy(req:AskRequest):
         raise HTTPException(400,'Question is empty.')
 
     language=_resolve_language(q,req.language)
-
-    # 1) Classify the question before deciding whether a factual answer is enough.
     ql=q.lower()
     analytical_terms=(
         'insight','insights','kenapa','mengapa','implikasi','risiko','rumusan',
@@ -125,10 +103,9 @@ def stable_ask_proxy(req:AskRequest):
         'management','pengurusan','trend','corak','apa yang boleh disimpulkan'
     )
     analytical=is_analytical(q) or any(term in ql for term in analytical_terms)
-
     structured=answer_structured(q,language,req.context)
 
-    # Straight factual questions remain fast and deterministic.
+    # Fast factual route.
     if structured and structured.get('answer') and not analytical:
         payload=dict(structured)
         payload.setdefault('confidence','high')
@@ -136,13 +113,47 @@ def stable_ask_proxy(req:AskRequest):
         payload['route']='local:factual:'+str(payload.get('route','structured'))
         return JSONResponse(payload,status_code=200)
 
-    # 2) Analytical questions should go through the richer synthesis layer first.
-    # The previous hosted service contains the LLM synthesis path; this call is bounded
-    # so a sleeping upstream cannot break the live demo.
+    # Management-grade local synthesis for E&E mismatch questions.
+    if analytical and ('e&e' in ql or 'elektrik' in ql or 'elektronik' in ql) and (
+        'mismatch' in ql or 'ketidaksepadanan' in ql or 'padanan' in ql
+    ):
+        ee=answer_structured('permintaan dan penawaran bakat E&E',language,req.context) or {}
+        mm=answer_structured('ketidaksepadanan graduan',language,req.context) or {}
+        ee_ans=str(ee.get('answer') or '').strip()
+        mm_ans=str(mm.get('answer') or '').strip()
+        if language=='ms':
+            answer=(
+                'Implikasi utamanya ialah isu bakat E&E tidak boleh dilihat sebagai isu jumlah bekalan semata-mata. '
+                + (mm_ans + ' ' if mm_ans else '')
+                + (ee_ans + ' ' if ee_ans else '')
+                + 'Walaupun unjuran agregat boleh menunjukkan lebihan, sebahagian pekerjaan khusus masih berisiko defisit. '
+                'Ini menunjukkan jurang utama ialah kesepadanan bidang, pekerjaan dan kemahiran. '
+                'Bagi pengurusan, keutamaan bukan sekadar menambah bilangan graduan, tetapi menumpukan intervensi kepada pekerjaan yang kritikal, '
+                'memperkukuh padanan graduan–pekerjaan dan memastikan kemahiran yang dibangunkan selari dengan keperluan industri.'
+            )
+        else:
+            answer=(
+                'The key implication is that E&E talent should not be treated as a simple total-supply problem. '
+                + (mm_ans + ' ' if mm_ans else '')
+                + (ee_ans + ' ' if ee_ans else '')
+                + 'Even where the aggregate projection shows a surplus, specific occupations can still face deficits. '
+                'The central issue is therefore alignment across fields of study, occupations and skills. '
+                'For management, the priority is not merely to increase graduate numbers, but to target critical occupations, improve graduate-to-job matching '
+                'and align skills development with industry demand.'
+            )
+        return JSONResponse({
+            'answer':answer,
+            'sources':_merge_sources(ee.get('sources'),mm.get('sources')),
+            'route':'local:management-synthesis',
+            'confidence':'high',
+            'llm_used':False
+        },status_code=200)
+
+    # Try richer upstream synthesis, but never let it hold the live demo for long.
     try:
         upstream_payload=req.model_dump()
         upstream_payload['question']=q
-        r=http_requests.post(STABLE_ASK_MASTIC+'/api/ask',json=upstream_payload,timeout=45)
+        r=http_requests.post(STABLE_ASK_MASTIC+'/api/ask',json=upstream_payload,timeout=12)
         if r.ok:
             try:
                 payload=r.json()
@@ -155,39 +166,8 @@ def stable_ask_proxy(req:AskRequest):
     except Exception:
         pass
 
-    # 3) Local analytical fallback: still interpret the evidence instead of returning
-    # a single number. This keeps the chatbot useful even when the LLM service sleeps.
+    # Deterministic analytical fallback for other questions.
     try:
-        if analytical and ('e&e' in ql or 'elektrik' in ql or 'elektronik' in ql) and (
-            'mismatch' in ql or 'ketidaksepadanan' in ql or 'padanan' in ql
-        ):
-            ee=answer_structured('permintaan dan penawaran bakat E&E',language,req.context) or {}
-            mm=answer_structured('ketidaksepadanan graduan',language,req.context) or {}
-            ee_ans=str(ee.get('answer') or '').strip()
-            mm_ans=str(mm.get('answer') or '').strip()
-            parts=[]
-            if language=='ms':
-                parts.append('Isyarat utama ialah cabaran bakat E&E bukan semata-mata jumlah bekalan, tetapi sejauh mana bakat itu sepadan dengan pekerjaan dan keperluan industri.')
-                if ee_ans:
-                    parts.append(ee_ans)
-                if mm_ans:
-                    parts.append(mm_ans)
-                parts.append('Secara pengurusan, lebihan pada peringkat agregat tidak boleh terus ditafsirkan sebagai isu bakat telah selesai. Tumpuan perlu diberi kepada pekerjaan yang masih berisiko defisit, padanan bidang–pekerjaan dan kemahiran yang diperlukan industri.')
-            else:
-                parts.append('The main signal is that the E&E talent challenge is not only about total supply, but whether talent is aligned with occupations and industry needs.')
-                if ee_ans:
-                    parts.append(ee_ans)
-                if mm_ans:
-                    parts.append(mm_ans)
-                parts.append('From a management perspective, an aggregate surplus should not be interpreted as the talent issue being resolved. Attention should remain on occupations with projected deficits, field-to-job alignment and industry-relevant skills.')
-            return JSONResponse({
-                'answer':' '.join(parts),
-                'sources':_merge_sources(ee.get('sources'),mm.get('sources')),
-                'route':'local:management-fallback',
-                'confidence':'high',
-                'llm_used':False
-            },status_code=200)
-
         pack=build_evidence_pack(q,req.context)
         evidence_text=pack.get('text') or ''
         if evidence_text:
@@ -202,16 +182,31 @@ def stable_ask_proxy(req:AskRequest):
     except Exception:
         pass
 
+    if structured and structured.get('answer'):
+        payload=dict(structured)
+        payload.setdefault('confidence','medium')
+        payload['llm_used']=False
+        payload['route']='local:last-resort:'+str(payload.get('route','structured'))
+        return JSONResponse(payload,status_code=200)
+
     return JSONResponse({
-        'answer':'Ask MASTIC sedang menyambung semula perkhidmatan analitik. Sila cuba semula sebentar lagi.',
+        'answer':'Ask MASTIC tidak dapat menjana jawapan buat masa ini. Sila cuba semula sebentar lagi.',
         'sources':[],
-        'route':'local:service-warming',
+        'route':'local:unavailable',
         'confidence':'low',
         'llm_used':False
     },status_code=200)
 """
-            if old_health in app_text:
-                app_text = app_text.replace(old_health, new_health, 1)
+
+            # Replace the original hosted proxy routes regardless of timeout values.
+            route_pattern = re.compile(
+                r"@app\.get\('/api/health'\)\s*def stable_health_proxy\(\):.*?"
+                r"@app\.post\('/api/ask'\)\s*def stable_ask_proxy\(req:AskRequest\):.*?"
+                r"raise HTTPException\(503,f'Ask MASTIC stable backend belum memberi respons: \{exc\}'\)",
+                re.S
+            )
+            app_text, n = route_pattern.subn(new_health, app_text, count=1)
+            if n:
                 APP.write_text(app_text, encoding="utf-8")
     except Exception:
         pass

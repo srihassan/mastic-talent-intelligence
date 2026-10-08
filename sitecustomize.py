@@ -514,7 +514,10 @@ if TARGET.exists():
 
   function renameSources(){
     document.querySelectorAll('#askThread .ask-source-card strong').forEach(function(el){
-      if(/rujukan|reference/i.test(el.textContent||'')) el.textContent='Sumber Rujukan';
+      const current=(el.textContent||'').trim();
+      if(current!=='Sumber Rujukan' && /rujukan|reference/i.test(current)){
+        el.textContent='Sumber Rujukan';
+      }
     });
   }
 

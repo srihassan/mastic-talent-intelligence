@@ -218,6 +218,10 @@ UI_MARKER = '<style id="masticgpt-ui-v1">'
 if TARGET.exists():
     try:
         html = TARGET.read_text(encoding="utf-8", errors="ignore")
+        # Refresh any earlier MASTICgpt UI injection so the latest UI is applied deterministically.
+        html = re.sub(r'<style id="masticgpt-ui-v1">.*?</style>', '', html, flags=re.S)
+        html = re.sub(r'<script id="masticgpt-ui-v1-script">.*?</script>', '', html, flags=re.S)
+        html = re.sub(r'<div class="mgpt-disclaimer-backdrop" id="mgptDisclaimer".*?</div>\s*</div>', '', html, count=1, flags=re.S)
         if UI_MARKER not in html:
             ui_css = r"""
 <style id="masticgpt-ui-v1">
@@ -243,8 +247,8 @@ if TARGET.exists():
   box-shadow:0 4px 12px rgba(8,32,68,.18)!important;
 }
 .ask-agent-avatar.large{
-  width:54px!important;
-  height:54px!important;
+  width:60px!important;
+  height:60px!important;
   border-width:2px!important;
 }
 .ask-agent-avatar svg{display:none!important}
@@ -252,8 +256,9 @@ if TARGET.exists():
   display:block!important;
   width:100%!important;
   height:100%!important;
-  object-fit:cover!important;
-  object-position:50% 38%!important;
+  object-fit:contain!important;
+  object-position:center center!important;
+  padding:1px!important;
   border-radius:50%!important;
 }
 

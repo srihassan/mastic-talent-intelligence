@@ -96,7 +96,24 @@ def stable_ask_proxy(req:AskRequest):
         raise HTTPException(400,'Question is empty.')
 
     language=_resolve_language(q,req.language)
-    ql=q.lower()
+    ql=q.lower().strip()
+
+    # Basic conversational greetings must never be routed into a dataset answer.
+    greetings={
+        'hi','hello','hai','hey','helo','salam','assalamualaikum',
+        'hi masticgpt','hello masticgpt','hai masticgpt'
+    }
+    if ql in greetings:
+        answer=('Hai! Saya MASTICgpt. Apa yang anda ingin tahu tentang data dan analitik bakat STEM?'
+                if language=='ms'
+                else 'Hi! I am MASTICgpt. What would you like to know about STEM talent data and analytics?')
+        return JSONResponse({
+            'answer':answer,
+            'sources':[],
+            'route':'local:greeting',
+            'confidence':'high',
+            'llm_used':False
+        },status_code=200)
     analytical_terms=(
         'insight','insights','kenapa','mengapa','implikasi','risiko','rumusan',
         'apa maksud','apakah maksud','apa yang perlu','perlu diberi perhatian',

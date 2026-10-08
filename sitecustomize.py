@@ -617,6 +617,14 @@ if TARGET.exists():
     const observer=new MutationObserver(renameSources);
     const thread=document.getElementById('askThread');
     if(thread) observer.observe(thread,{childList:true,subtree:true});
+
+    /* Keep the Render free service awake while this presentation page remains open.
+       Render spins down after 15 minutes without inbound traffic, so ping health every 4 minutes. */
+    const keepAlive=function(){
+      fetch('/api/health',{cache:'no-store',keepalive:true}).catch(function(){});
+    };
+    keepAlive();
+    window.__masticgptKeepAlive=setInterval(keepAlive,4*60*1000);
   });
 })();
 </script>
